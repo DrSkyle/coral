@@ -50,6 +50,13 @@ pub(crate) struct Caller {
     pub(crate) started_runs: Mutex<Vec<RunId>>,
 }
 
+/// What one Sub-agent tool call returns to the thread.
+pub(crate) struct ToolOutput {
+    pub(crate) content: String,
+    pub(crate) is_error: bool,
+    pub(crate) run_id: Option<RunId>,
+}
+
 pub(crate) struct RunTools {
     commands: TaskCommands,
     runs: RunModule,
@@ -61,13 +68,8 @@ impl RunTools {
     }
 
     /// Runs the tool `name` with the arguments the model wrote, and returns the JSON text the model
-    /// reads and the Run that an `exec` started.
-    pub(crate) async fn call(
-        &self,
-        caller: &Caller,
-        name: &str,
-        arguments: &str,
-    ) -> (String, Option<RunId>) {
+    /// reads, whether the tool returned an error, and the Run that an `exec` started.
+    pub(crate) async fn call(&self, caller: &Caller, name: &str, arguments: &str) -> ToolOutput {
         let outcome = match name {
             "exec" => self.exec(caller, arguments).await,
             "wait" => self.wait(caller, arguments).await,
@@ -75,15 +77,19 @@ impl RunTools {
             _ => Err(Failure::unknown_tool(name)),
         };
         let started = outcome.as_ref().ok().filter(|_| name == "exec");
-        let started = started.map(|update| update.run_id().clone());
-        let text = match outcome {
-            Ok(update) => run_result(&update),
+        let run_id = started.map(|update| update.run_id().clone());
+        let (content, is_error) = match outcome {
+            Ok(update) => (run_result(&update), false),
             Err(failure) => {
                 coral_telemetry::record_failure(&tracing::Span::current(), failure.code);
-                failure.text()
+                (failure.text(), true)
             }
         };
-        (text, started)
+        ToolOutput {
+            content,
+            is_error,
+            run_id,
+        }
     }
 
     /// Runs a Program in the lead's Task, then waits for its Run.
